@@ -157,8 +157,12 @@ func start(config *PGConfig) (*PG, error) {
 		"-D", dataDir, // Data directory
 		"-k", sockDir, // Location for the UNIX socket
 		"-h", "", // Disable TCP listening
-		"-F", // No fsync, just go fast
 	}
+
+	if config.FSync == false {
+		args = append(args, "-F")
+	}
+
 	if len(config.AdditionalArgs) > 0 {
 		args = append(args, config.AdditionalArgs...)
 	}
