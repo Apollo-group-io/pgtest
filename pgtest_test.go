@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/rubenv/pgtest"
+	"github.com/Apollo-group-io/pgtest"
 	"github.com/stretchr/testify/assert"
 )
 
