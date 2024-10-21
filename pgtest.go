@@ -159,7 +159,7 @@ func start(config *PGConfig) (*PG, error) {
 		"-h", "", // Disable TCP listening
 	}
 
-	if config.FSync == false {
+	if !config.FSync {
 		args = append(args, "-F")
 	}
 
@@ -185,22 +185,36 @@ func start(config *PGConfig) (*PG, error) {
 		return nil, abort("Failed to start PostgreSQL", cmd, stderr, stdout, err)
 	}
 
-	// Connect to DB
-	dsn := makeDSN(sockDir, "postgres", isRoot)
+	// Connect to DB "postgres" with no password
+	dsn := makeDSN(sockDir, "postgres", "")
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, abort("Failed to connect to DB", cmd, stderr, stdout, err)
 	}
 
-	// Prepare test database
+	// Prepare database with password
 	err = retry(func() error {
+		// Ensure db exists
 		var exists bool
-		err = db.QueryRow("SELECT 1 FROM pg_database WHERE datname = 'test'").Scan(&exists)
-		if exists {
-			return nil
+		err = db.QueryRow(fmt.Sprintf("SELECT 1 FROM pg_database WHERE datname = '%s'", config.DbName)).Scan(&exists)
+		if !exists {
+			_, err := db.Exec(fmt.Sprintf("CREATE DATABASE %s", config.DbName))
+			return err
 		}
 
-		_, err := db.Exec("CREATE DATABASE test")
+		// Ensure the password and the user are configured
+		user := pgUser()
+		if isRoot {
+			// Set password for postgres user
+			_, err = db.Exec(fmt.Sprintf("ALTER USER postgres WITH PASSWORD '%s'", config.Password))
+		} else {
+			// Create a new user with the password
+			_, err = db.Exec(fmt.Sprintf("CREATE USER %s WITH PASSWORD '%s'", user, config.Password))
+			if err != nil {
+				return err
+			}
+			_, err = db.Exec(fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s", config.DbName, user))
+		}
 		return err
 	}, 1000, 10*time.Millisecond)
 	if err != nil {
@@ -212,8 +226,8 @@ func start(config *PGConfig) (*PG, error) {
 		return nil, abort("Failed to disconnect", cmd, stderr, stdout, err)
 	}
 
-	// Connect to it properly
-	dsn = makeDSN(sockDir, "test", isRoot)
+	// Connect to db with password
+	dsn = makeDSN(sockDir, config.DbName, config.Password)
 	db, err = sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, abort("Failed to connect to test DB", cmd, stderr, stdout, err)
@@ -226,7 +240,7 @@ func start(config *PGConfig) (*PG, error) {
 		DB: db,
 
 		Host: sockDir,
-		User: pgUser(isRoot),
+		User: pgUser(),
 		Name: "test",
 
 		persistent: config.IsPersistent,
@@ -330,21 +344,31 @@ func findBinPath(binDir string) (string, error) {
 	return "", fmt.Errorf("Did not find PostgreSQL executables installed")
 }
 
-func pgUser(isRoot bool) string {
-	user := ""
+func pgUser() string {
+	currentUser, err := user.Current()
+	isRoot := currentUser.Username == "root"
 	if isRoot {
-		user = "postgres"
+		return "postgres"
 	}
-	return user
+	if err != nil {
+		return "postgres" // fallback to postgres if we can't get the current user
+	}
+	return currentUser.Username
 }
 
-func makeDSN(sockDir, dbname string, isRoot bool) string {
+func makeDSN(sockDir, dbname, password string) string {
 	dsnUser := ""
-	user := pgUser(isRoot)
+	dsnPassword := ""
+	user := pgUser()
+	// add user if defined
 	if user != "" {
 		dsnUser = fmt.Sprintf("user=%s", user)
 	}
-	return fmt.Sprintf("host=%s dbname=%s %s", sockDir, dbname, dsnUser)
+	// add password if defined
+	if password != "" {
+		dsnPassword = fmt.Sprintf("password=%s", password)
+	}
+	return fmt.Sprintf("host=%s dbname=%s %s %s", sockDir, dbname, dsnUser, dsnPassword)
 }
 
 func retry(fn func() error, attempts int, interval time.Duration) error {

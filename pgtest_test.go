@@ -96,3 +96,16 @@ func TestAdditionalArgs(t *testing.T) {
 	err = pg.Stop()
 	assert.NoError(err)
 }
+
+func TestDbNameAndPassword(t *testing.T) {
+	t.Parallel()
+
+	assert := assert.New(t)
+
+	pg, err := pgtest.New().SetDbName("mydbname").SetPassword("mypassword123").Start()
+	assert.NoError(err)
+	assert.NotNil(pg)
+
+	err = pg.Stop()
+	assert.NoError(err)
+}
