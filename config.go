@@ -6,6 +6,8 @@ type PGConfig struct {
 	IsPersistent   bool     // Whether to make the current configuraton persistent or not
 	AdditionalArgs []string // Additional arguments to pass to the postgres command
 	FSync          bool     // To set -F flag
+	DbName         string
+	Password       string
 }
 
 func New() *PGConfig {
@@ -14,6 +16,8 @@ func New() *PGConfig {
 		Dir:          "",
 		IsPersistent: false,
 		FSync:        false,
+		DbName:       "test",
+		Password:     "",
 	}
 }
 
@@ -44,6 +48,16 @@ func (c *PGConfig) WithAdditionalArgs(args ...string) *PGConfig {
 
 func (c *PGConfig) EnableFSync() *PGConfig {
 	c.FSync = true
+	return c
+}
+
+func (c *PGConfig) SetPassword(password string) *PGConfig {
+	c.Password = password
+	return c
+}
+
+func (c *PGConfig) SetDbName(dbName string) *PGConfig {
+	c.DbName = dbName
 	return c
 }
 
