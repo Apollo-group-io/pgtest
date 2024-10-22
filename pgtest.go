@@ -56,43 +56,50 @@ func StartPersistent(folder string) (*PG, error) {
 	return start(New().DataDir(folder).Persistent())
 }
 
-// When the password is provided this function write the password
+// When the password is provided this function writes the password
 // to a temp file, and returns its path.
-func createTempPasswordFile(password string, pgUID, pgGID int) (string, error) {
+func createTempPasswordFile(password string, pgUID, pgGID int) (string, func(), error) {
 	// Create a temporary file
-	tempFile, err := os.CreateTemp("", "pg_pwd_*")
+	pwdTempFile, err := os.CreateTemp("", "pg_pwd_*")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %w", err)
+		return "", nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	tempFilePath := tempFile.Name()
+	tempFilePath := pwdTempFile.Name()
 
 	// Set file permissions to 0600 (read/write for owner only)
-	if err := tempFile.Chmod(0600); err != nil {
-		tempFile.Close()
+	if err := pwdTempFile.Chmod(0600); err != nil {
+		pwdTempFile.Close()
 		os.Remove(tempFilePath)
-		return "", fmt.Errorf("failed to set file permissions: %w", err)
+		return "", nil, fmt.Errorf("failed to set file permissions: %w", err)
 	}
 
 	// Write the password to the file
-	if _, err := tempFile.WriteString(password); err != nil {
-		tempFile.Close()
+	if _, err := pwdTempFile.WriteString(password); err != nil {
+		pwdTempFile.Close()
 		os.Remove(tempFilePath)
-		return "", fmt.Errorf("failed to write password to file: %w", err)
+		return "", nil, fmt.Errorf("failed to write password to file: %w", err)
 	}
 
 	// Close the file
-	if err := tempFile.Close(); err != nil {
+	if err := pwdTempFile.Close(); err != nil {
 		os.Remove(tempFilePath)
-		return "", fmt.Errorf("failed to close temp file: %w", err)
+		return "", nil, fmt.Errorf("failed to close temp file: %w", err)
 	}
 
 	// Change the owner
 	err = os.Chown(tempFilePath, pgUID, pgGID)
 	if err != nil {
-		return "", fmt.Errorf("failed to set permissions on the temp file: %w", err)
+		return "", nil, fmt.Errorf("failed to set permissions on the temp file: %w", err)
 	}
 
-	return tempFilePath, nil
+	cleanupPwdFile := func() {
+		err := os.Remove(tempFilePath)
+		if err != nil {
+			fmt.Println("error while removing pwdfile: %w", err)
+		}
+	}
+
+	return tempFilePath, cleanupPwdFile, nil
 }
 
 // start Starts a new PostgreSQL database
@@ -183,27 +190,21 @@ func start(config *PGConfig) (*PG, error) {
 	if os.IsNotExist(err) {
 		args := []string{
 			"-D", dataDir,
+			"--no-sync",
 		}
 
 		// setup password if specified
 		if config.Password != "" {
-			passwordFile, err := createTempPasswordFile(config.Password, pgUID, pgGID)
+			pwdFile, cleanupPwdFile, err := createTempPasswordFile(config.Password, pgUID, pgGID)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create password file: %w", err)
 			}
 			// for more info on how this is being done
 			// https://www.postgresql.org/docs/current/app-initdb.html#APP-INITDB-OPTION-AUTH
 			// https://www.postgresql.org/docs/current/app-initdb.html#APP-INITDB-OPTION-PWFILE
-			args = append(args, "-A", "scram-sha-256", fmt.Sprintf("--pwfile=%s", passwordFile))
-			defer (func() {
-				err := os.Remove(passwordFile)
-				if err != nil {
-					fmt.Println("error while removing pwdfile: %w", err)
-				}
-			})()
-		} else {
-			// don't wait for creation of files if password not specified
-			args = append(args, "--no-sync")
+			args = append(args, "-A", "scram-sha-256", fmt.Sprintf("--pwfile=%s", pwdFile))
+			// remove the password file, when we return from start()
+			defer cleanupPwdFile()
 		}
 
 		// execute the command
@@ -223,7 +224,12 @@ func start(config *PGConfig) (*PG, error) {
 		"-h", "", // Disable TCP listening
 	}
 
+	// by default config.Fsync is false,
+	// so fsync is disabled, unless it is set
+	// true by the user, in which case we
+	// skip the -F flag
 	if !config.FSync {
+		// no fsync, just go fast
 		args = append(args, "-F")
 	}
 
