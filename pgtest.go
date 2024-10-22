@@ -56,6 +56,45 @@ func StartPersistent(folder string) (*PG, error) {
 	return start(New().DataDir(folder).Persistent())
 }
 
+// When the password is provided this function write the password
+// to a temp file, and returns its path.
+func createTempPasswordFile(password string, pgUID, pgGID int) (string, error) {
+	// Create a temporary file
+	tempFile, err := os.CreateTemp("", "pg_pwd_*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempFilePath := tempFile.Name()
+
+	// Set file permissions to 0600 (read/write for owner only)
+	if err := tempFile.Chmod(0600); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		return "", fmt.Errorf("failed to set file permissions: %w", err)
+	}
+
+	// Write the password to the file
+	if _, err := tempFile.WriteString(password); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		return "", fmt.Errorf("failed to write password to file: %w", err)
+	}
+
+	// Close the file
+	if err := tempFile.Close(); err != nil {
+		os.Remove(tempFilePath)
+		return "", fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Change the owner
+	err = os.Chown(tempFilePath, pgUID, pgGID)
+	if err != nil {
+		return "", fmt.Errorf("failed to set permissions on the temp file: %w", err)
+	}
+
+	return tempFilePath, nil
+}
+
 // start Starts a new PostgreSQL database
 //
 // Will listen on a unix socket and initialize the database in the given
@@ -142,9 +181,34 @@ func start(config *PGConfig) (*PG, error) {
 	// Initialize PostgreSQL data directory
 	_, err = os.Stat(filepath.Join(dataDir, "postgresql.conf"))
 	if os.IsNotExist(err) {
-		init := prepareCommand(isRoot, filepath.Join(binPath, "initdb"),
+		args := []string{
 			"-D", dataDir,
-			"--no-sync",
+		}
+
+		// setup password if specified
+		if config.Password != "" {
+			passwordFile, err := createTempPasswordFile(config.Password, pgUID, pgGID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create password file: %w", err)
+			}
+			// for more info on how this is being done
+			// https://www.postgresql.org/docs/current/app-initdb.html#APP-INITDB-OPTION-AUTH
+			// https://www.postgresql.org/docs/current/app-initdb.html#APP-INITDB-OPTION-PWFILE
+			args = append(args, "-A", "scram-sha-256", fmt.Sprintf("--pwfile=%s", passwordFile))
+			defer (func() {
+				err := os.Remove(passwordFile)
+				if err != nil {
+					fmt.Println("error while removing pwdfile: %w", err)
+				}
+			})()
+		} else {
+			// don't wait for creation of files if password not specified
+			args = append(args, "--no-sync")
+		}
+
+		// execute the command
+		init := prepareCommand(isRoot, filepath.Join(binPath, "initdb"),
+			args...,
 		)
 		out, err := init.CombinedOutput()
 		if err != nil {
@@ -185,8 +249,7 @@ func start(config *PGConfig) (*PG, error) {
 		return nil, abort("Failed to start PostgreSQL", cmd, stderr, stdout, err)
 	}
 
-	// Connect to DB "postgres" with no password
-	dsn := makeDSN(sockDir, "postgres", "")
+	dsn := makeDSN(sockDir, "postgres", config.Password)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, abort("Failed to connect to DB", cmd, stderr, stdout, err)
@@ -199,23 +262,11 @@ func start(config *PGConfig) (*PG, error) {
 		err = db.QueryRow(fmt.Sprintf("SELECT 1 FROM pg_database WHERE datname = '%s'", config.DbName)).Scan(&exists)
 		if !exists {
 			_, err := db.Exec(fmt.Sprintf("CREATE DATABASE %s", config.DbName))
-			return err
-		}
-
-		// Ensure the password and the user are configured
-		user := pgUser()
-		if isRoot {
-			// Set password for postgres user
-			_, err = db.Exec(fmt.Sprintf("ALTER USER postgres WITH PASSWORD '%s'", config.Password))
-		} else {
-			// Create a new user with the password
-			_, err = db.Exec(fmt.Sprintf("CREATE USER %s WITH PASSWORD '%s'", user, config.Password))
 			if err != nil {
 				return err
 			}
-			_, err = db.Exec(fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s", config.DbName, user))
 		}
-		return err
+		return nil
 	}, 1000, 10*time.Millisecond)
 	if err != nil {
 		return nil, abort("Failed to prepare test DB", cmd, stderr, stdout, err)
@@ -241,7 +292,7 @@ func start(config *PGConfig) (*PG, error) {
 
 		Host: sockDir,
 		User: pgUser(),
-		Name: "test",
+		Name: config.DbName,
 
 		persistent: config.IsPersistent,
 
