@@ -5,7 +5,7 @@ type PGConfig struct {
 	Dir            string   // Directory for storing database files, removed for non-persistent configs
 	IsPersistent   bool     // Whether to make the current configuraton persistent or not
 	AdditionalArgs []string // Additional arguments to pass to the postgres command
-	FSync          bool     // To set -F flag
+	FSync          bool     // Sets -F flag when false
 	DbName         string
 	Password       string
 }
@@ -15,7 +15,7 @@ func New() *PGConfig {
 		BinDir:       "",
 		Dir:          "",
 		IsPersistent: false,
-		FSync:        false,
+		FSync:        false, // disable fsync by default - just go fast.
 		DbName:       "test",
 		Password:     "",
 	}
